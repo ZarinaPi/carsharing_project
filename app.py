@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
+from sqlalchemy.orm import joinedload, selectinload
 
 app = Flask(__name__)
 CORS(app)  # Разрешить запросы из браузера
@@ -24,7 +25,7 @@ class CarClass(db.Model):
     
     # Рефлексивная связь (родитель → потомки)
     parent = db.relationship('CarClass', 
-                             backref=db.backref('children', lazy='dynamic'),
+                             backref=db.backref('children', lazy='select'),
                              remote_side=[id_class])
     
     def to_dict(self):
@@ -111,8 +112,8 @@ class Enumeration(db.Model):
     value_type = db.Column(db.String(20), default='string') # string, numeric, icon
     
     # Связи
-    values = db.relationship('EnumValue', backref='enumeration', lazy='dynamic', cascade='all, delete-orphan')
-    linked_classes = db.relationship('ClassEnum', backref='enumeration', lazy='dynamic')
+    values = db.relationship('EnumValue', backref='enumeration', lazy='select', cascade='all, delete-orphan')
+    linked_classes = db.relationship('ClassEnum', backref='enumeration', lazy='select')
 
     def to_dict(self):
         return {
@@ -152,7 +153,7 @@ class ClassEnum(db.Model):
     id_enum = db.Column(db.Integer, db.ForeignKey('enumerations.id_enum'), primary_key=True)
     is_required = db.Column(db.Boolean, default=False)
     
-    car_class = db.relationship('CarClass', backref=db.backref('linked_enums', lazy='dynamic'))
+    car_class = db.relationship('CarClass', backref=db.backref('linked_enums', lazy='select'))
 
 class CarEnumValue(db.Model):
     "Выбранное значение характеристики у конкретной машины"
@@ -161,7 +162,7 @@ class CarEnumValue(db.Model):
     id_enum = db.Column(db.Integer, db.ForeignKey('enumerations.id_enum'), primary_key=True)
     id_value = db.Column(db.Integer, db.ForeignKey('enum_values.id_value'), nullable=False)
     
-    car = db.relationship('Car', backref=db.backref('attributes', lazy='dynamic'))
+    car = db.relationship('Car', backref=db.backref('attributes', lazy='select'))
     enum = db.relationship('Enumeration')
     value_obj = db.relationship('EnumValue')
     
@@ -200,7 +201,7 @@ def add_class():
 
 @app.route('/api/class/<int:id_class>', methods=['DELETE'])
 def delete_class(id_class):
-    clazz = CarClass.query.get(id_class)
+    clazz = CarClass.query.options(joinedload(CarClass.children), joinedload(CarClass.parent)).get(id_class)
     if not clazz:
         return jsonify({'error': 'Class not found'}), 404
 
@@ -250,7 +251,7 @@ def move_class(id_class):
     data = request.json
     new_parent_id = data.get('new_parent_id')
     
-    clazz = CarClass.query.get(id_class)
+    clazz = CarClass.query.options(joinedload(CarClass.parent)).get(id_class)
     if not clazz:
         return jsonify({'error': 'Class not found'}), 404
     
@@ -266,7 +267,7 @@ def move_class(id_class):
 @app.route('/api/class/<int:id_class>/children', methods=['GET'])
 def get_children(id_class):
     "Найти всех потомков класса"
-    clazz = CarClass.query.get(id_class)
+    clazz = CarClass.query.options(joinedload(CarClass.parent)).get(id_class)
     if not clazz:
         return jsonify({'error': 'Class not found'}), 404
     
@@ -280,7 +281,7 @@ def get_children(id_class):
 @app.route('/api/class/<int:id_class>/parents', methods=['GET'])
 def get_parents(id_class):
     "Найти всех родителей (предков) класса"
-    clazz = CarClass.query.get(id_class)
+    clazz = CarClass.query.options(joinedload(CarClass.parent)).get(id_class)
     if not clazz:
         return jsonify({'error': 'Class not found'}), 404
     
@@ -294,15 +295,15 @@ def get_parents(id_class):
 @app.route('/api/class/terminal', methods=['GET'])
 def get_terminal_classes():
     "Найти все терминальные классы (листья дерева)"
-    all_classes = CarClass.query.all()
-    terminal = [c for c in all_classes if c.children.count() == 0]
+    all_classes = CarClass.query.options(selectinload(CarClass.children)).all()
+    terminal = [c for c in all_classes if not c.children]
     return jsonify({'terminal_classes': [c.to_dict() for c in terminal]}), 200
 
 
 @app.route('/api/class/tree', methods=['GET'])
 def get_tree():
     "Просмотреть всю структуру классификатора"
-    roots = CarClass.query.filter_by(main_class=None).all()
+    roots = CarClass.query.filter_by(main_class=None).options(selectinload(CarClass.children)).all()
     
     def build_tree(node):
         return {
@@ -373,7 +374,7 @@ def update_car(id_car):
 @app.route('/api/cars', methods=['GET'])
 def get_cars():
     "Получить список всех автомобилей"
-    cars = Car.query.all()
+    cars = Car.query.options(joinedload(Car.car_class)).all()
     return jsonify({'cars': [c.to_dict() for c in cars]}), 200
 
 
@@ -388,7 +389,7 @@ def get_cars_by_class(id_class):
     all_classes = [clazz] + clazz.get_all_children()
     class_ids = [c.id_class for c in all_classes]
     
-    cars = Car.query.filter(Car.id_class.in_(class_ids)).all()
+    cars = Car.query.filter(Car.id_class.in_(class_ids)).options(joinedload(Car.car_class)).all()
     return jsonify({'cars': [c.to_dict() for c in cars]}), 200
 
 
